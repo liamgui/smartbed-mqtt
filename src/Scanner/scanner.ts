@@ -1,4 +1,4 @@
-import { logError, logInfo } from '@utils/logger';
+import { logError, logInfo, logWarn } from '@utils/logger';
 import { getDevices } from './options';
 import { IESPConnection } from 'ESPHome/IESPConnection';
 import { buildDictionary } from '@utils/buildDictionary';
@@ -46,15 +46,20 @@ export const scanner = async (esphome: IESPConnection) => {
     if (index === -1) index = deviceNames.findIndex((deviceName) => lowerName.startsWith(deviceName));
     if (index === -1) return;
 
-    logDevice(bleDevice);
+    await logDevice(bleDevice);
     const mapName = deviceNames.splice(index, 1)[0];
     const { connect, disconnect, pair, getDeviceInfo, getServices } = bleDevice;
     logInfo(`[Scanner] Connecting`);
-    await connect();
-    const device = devicesMap[mapName];
-    if (device.pair) {
-      logInfo('[Scanner] Pairing');
-      await pair();
+    try {
+      await connect();
+      const device = devicesMap[mapName];
+      if (device.pair) {
+        logInfo('[Scanner] Pairing');
+        await pair();
+      }
+    } catch (error) {
+      logWarn('[Scanner] Failed to connect or pair device:', name, error);
+      return;
     }
 
     logInfo('[Scanner] Querying GATT services');

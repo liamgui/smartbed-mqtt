@@ -46,6 +46,8 @@ An MQTT broker is required. The [Mosquitto official Add-On](https://github.com/h
 
 For BLE controlled beds a dedicated ESP32 running ESPHome's bluetooth proxy is required. Due to limitations in ESPHome, specifically since 2023.7 only one connection can use the bluetooth proxy of an ESP32 at a time, the BLE proxy will need to not be added (or disabled if already added) to HomeAssistant. Use the [ESPHome Ready-Made Projects](https://esphome.io/projects/?type=bluetooth) page to create an ESPHome bluetooth proxy and join it to your network.
 
+If you see long idle drop-offs, you can enable automatic proxy recovery on repeated BLE connection timeouts with `bleProxyAutoRebootOnTimeout`. Use `bleProxyAutoRebootWindowMinutes` and `bleProxyAutoRebootCooldownMinutes` to control how often it will reboot the proxy.
+
 # Sleeptracker AI Support (Cloud)
 
 ## Configuration
@@ -143,7 +145,7 @@ Initial prototyping was only possible due to assistance from James on Discord.
 
 ## Configuring
 
-You must specify at least one bleProxy as demonstrated in the config defaults. You also need to supply at least one Richmat controller with `name`, `friendlyName`, `remoteCode`, and optionally `stayConnected`.
+You must specify at least one bleProxy as demonstrated in the config defaults. You also need to supply at least one Richmat controller with `name`, `friendlyName`, `remoteCode`, and optionally `stayConnected`, `commandProtocol`, `motorPulseCount`, and `motorPulseDelayMs`.
 
 ## Current features include:
 
@@ -156,6 +158,10 @@ You must specify at least one bleProxy as demonstrated in the config defaults. Y
 ## Notes
 
 Setting `stayConnected` to `true` will stop you from being able to use the app to control the bed if the bed only accepts one Bluetooth connection.
+
+The controller variant is normally detected from the bed's advertisement, falling back to its GATT services when the advertisement is incomplete. `commandProtocol` (`wilinke`, `nordic`, `single`, `prefix55`, `prefixaa`) overrides the command frame format for beds that need a different one — leave it unset to keep each variant's own default.
+
+`motorPulseCount` (default 25) and `motorPulseDelayMs` (default 100) tune how a held motor button moves the bed: the command is repeated `motorPulseCount` times, waiting `motorPulseDelayMs` between each. Lower the count if a held button overshoots.
 
 Support for this was only possible due to assistance from getrav on Discord. This was originally reverse engineered from a Sven & Son bed, so your mileage may vary.
 
@@ -292,7 +298,7 @@ Support for this was only possible due to assistance from david_nagy, corne & PT
 
 ## Configuring
 
-You must specify at least one bleProxy as demonstrated in the config defaults. You also need to supply at least one Keeson controller with `name` and `friendlyName`.
+You must specify at least one bleProxy as demonstrated in the config defaults. You also need to supply at least one Keeson controller with `name`, `friendlyName`, and optionally `variant`, `stayConnected`, `motorPulseCount`, and `motorPulseDelayMs`.
 
 ## Current features include:
 
@@ -304,7 +310,11 @@ You must specify at least one bleProxy as demonstrated in the config defaults. Y
 
 ## Notes
 
-This remains connected to the bed controller and due to the bed only accepting one connection it will stop you from using the app to control the bed.
+Setting `stayConnected` to `true` will keep a connection open and can prevent idle drop-offs, but if the bed only accepts one Bluetooth connection it will stop you from using the app/remote.
+
+`variant` selects the controller: leave it as `auto` to detect it from the bed, or pin it to `base` or `ksbt` if detection picks the wrong one.
+
+`motorPulseCount` (default 25) and `motorPulseDelayMs` (default 200) tune how a held motor button moves the bed: the command is repeated `motorPulseCount` times, waiting `motorPulseDelayMs` between each.
 
 Initial prototyping was only possible due to assistance from [@alanbixby](https://github.com/alanbixby/) on Discord.
 

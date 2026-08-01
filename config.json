@@ -1,8 +1,8 @@
 {
   "name": "Smartbed MQTT",
-  "version": "1.1.23",
+  "version": "1.1.24",
   "slug": "smartbed-mqtt",
-  "description": "A Home Assistant add-on to enable controlling smart beds.",
+  "description": "A Home Assistant add-on to enable controlling smart beds. *Chris's Fork*",
   "url": "https://github.com/richardhopton/smartbed-mqtt",
   "startup": "application",
   "arch": ["aarch64", "amd64", "armhf", "armv7", "i386"],
@@ -47,6 +47,9 @@
         "host": "bluetooth-proxy.local"
       }
     ],
+    "bleProxyAutoRebootOnTimeout": true,
+    "bleProxyAutoRebootWindowMinutes": 5,
+    "bleProxyAutoRebootCooldownMinutes": 30,
     "richmatDevices": [
       {
         "name": "QRRM12345",
@@ -97,7 +100,9 @@
     "keesonDevices": [
       {
         "name": "KSBT03C000015046",
-        "friendlyName": "Keeson Bed"
+        "friendlyName": "Keeson Bed",
+        "variant": "auto",
+        "stayConnected": false
       }
     ],
     "octoDevices": [
@@ -153,12 +158,18 @@
         "expectedServerName": "str?"
       }
     ],
+    "bleProxyAutoRebootOnTimeout": "bool?",
+    "bleProxyAutoRebootWindowMinutes": "int(1,)?",
+    "bleProxyAutoRebootCooldownMinutes": "int(1,)?",
     "richmatDevices": [
       {
         "name": "str",
         "friendlyName": "str",
         "remoteCode": "str",
-        "stayConnected": "bool?"
+        "commandProtocol": "list(wilinke|nordic|single|prefix55|prefixaa)?",
+        "stayConnected": "bool?",
+        "motorPulseCount": "int(1,)?",
+        "motorPulseDelayMs": "int(0,)?"
       }
     ],
     "linakDevices": [
@@ -204,7 +215,11 @@
     "keesonDevices": [
       {
         "name": "str",
-        "friendlyName": "str"
+        "friendlyName": "str",
+        "variant": "list(auto|base|ksbt)?",
+        "stayConnected": "bool?",
+        "motorPulseCount": "int(1,)?",
+        "motorPulseDelayMs": "int(0,)?"
       }
     ],
     "octoDevices": [

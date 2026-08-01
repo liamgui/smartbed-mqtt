@@ -5,6 +5,9 @@ export interface RichmatDevice {
   name: string;
   remoteCode: string;
   stayConnected: boolean | undefined;
+  commandProtocol: 'wilinke' | 'nordic' | 'single' | 'prefix55' | 'prefixaa' | undefined;
+  motorPulseCount?: number;
+  motorPulseDelayMs?: number;
 }
 
 interface OptionsJson {

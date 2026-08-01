@@ -1,11 +1,15 @@
 import { Connection } from '@2colors/esphome-native-api';
+import type { ConnectionConfig, EntityList, ListEntitiesButtonResponse } from '@2colors/esphome-native-api';
 import { Dictionary } from '@utils/Dictionary';
 import { Deferred } from '@utils/deferred';
 import { logInfo, logWarn } from '@utils/logger';
 import { seconds } from '@utils/seconds';
 import { IESPConnection } from './IESPConnection';
-import { connect } from './connect';
+import { connectWithRetry } from './connect';
 import { mergeAdvertisement, newAdvertisement } from './mergeAdvertisement';
+// Type-only: `./options` reads ../data/options.json at module load, which is not available to tests.
+// The runtime values are supplied by connectToESPHome.
+import type { BLEProxy, BLEProxyRecoveryOptions } from './options';
 import { BLEAdvertisement } from './types/BLEAdvertisement';
 import { BLEDevice } from './types/BLEDevice';
 import { IBLEDevice } from './types/IBLEDevice';
@@ -17,23 +21,84 @@ const ADVERTISEMENT_SETTLE_TIME = seconds(5);
 const hasAdvertisementData = ({ advertisement: { serviceUuidsList, manufacturerDataList } }: IBLEDevice) =>
   !!serviceUuidsList.length || !!manufacturerDataList.length;
 
+const defaultRecoveryOptions: BLEProxyRecoveryOptions = {
+  autoRebootOnTimeout: false,
+  rebootWindowMinutes: 5,
+  rebootCooldownMinutes: 30,
+};
+
 export class ESPConnection implements IESPConnection {
-  constructor(private connections: Connection[]) {}
+  private restartButtonKeys = new Map<string, number>();
+  private bleDevices = new Set<BLEDevice>();
+  private connectionRefreshes = new Map<string, Promise<void>>();
+  private intentionalDisconnects = new Set<Connection>();
+  private proxyTimeouts = new Map<string, number>();
+  private proxyReboots = new Map<string, number>();
+  private proxyRecovery: BLEProxyRecoveryOptions;
+
+  constructor(
+    private connections: Connection[],
+    private proxies: BLEProxy[] = [],
+    recoveryOptions: BLEProxyRecoveryOptions = defaultRecoveryOptions
+  ) {
+    this.proxyRecovery = recoveryOptions;
+    this.connections.forEach((connection) => this.attachConnectionHandlers(connection));
+  }
 
   async reconnect(): Promise<void> {
+    const previousConnections = this.connections;
     this.disconnect();
     logInfo('[ESPHome] Reconnecting...');
-    this.connections = await Promise.all(
-      this.connections.map((connection) =>
-        connect(new Connection({ host: connection.host, port: connection.port, password: connection.password }))
-      )
+    const configs = this.proxies.length
+      ? this.proxies
+      : this.connections.map((connection) => ({
+          host: connection.host,
+          port: connection.port,
+          password: connection.password,
+          encryptionKey: (connection as any).encryptionKey,
+          expectedServerName: (connection as any).expectedServerName,
+        }));
+    this.connections = await Promise.all(configs.map((config) => connectWithRetry(config)));
+    this.connections.forEach((connection) => this.attachConnectionHandlers(connection));
+    const connectionByKey = new Map(
+      this.connections.map((connection) => [this.getProxyKey(connection.host, connection.port), connection])
     );
+    for (const device of this.bleDevices) {
+      const previous = previousConnections.find((connection) => device.usesConnection(connection));
+      if (!previous) continue;
+      const next = connectionByKey.get(this.getProxyKey(previous.host, previous.port));
+      if (next) device.updateConnection(next);
+    }
+  }
+
+  async rebootProxy(host: string, port?: number): Promise<void> {
+    const normalizedPort = this.normalizePort(port);
+    const connection = this.connections.find(
+      (candidate) => candidate.host === host && candidate.port === normalizedPort
+    );
+    const primaryResult = await this.tryRebootWithConnection(host, normalizedPort, connection);
+    if (primaryResult) return;
+
+    const proxyConfig = this.getProxyConfig(host, normalizedPort);
+    if (!proxyConfig) {
+      logWarn(`[ESPHome] No proxy config found for host: ${host}`);
+      return;
+    }
+
+    const tempConnection = new Connection({ ...proxyConfig, reconnect: false });
+    try {
+      const tempResult = await this.tryRebootWithConnection(host, normalizedPort, tempConnection, true);
+      if (!tempResult) logWarn(`[ESPHome] Failed to reboot proxy: ${host}`);
+    } finally {
+      tempConnection.disconnect();
+    }
   }
 
   disconnect(): void {
     logInfo('[ESPHome] Disconnecting...');
 
     for (const connection of this.connections) {
+      this.intentionalDisconnects.add(connection);
       connection.disconnect();
       connection.connected = false;
     }
@@ -104,7 +169,11 @@ export class ESPConnection implements IESPConnection {
         seenAddresses.push(address);
 
         const name = nameMapper ? nameMapper(merged.name) : merged.name;
-        onNewDeviceFound(new BLEDevice(name, merged, connection));
+        // Hand the merged advertisement to the device, not this single packet - BLEDevice reads
+        // through to it, so later packets still reach device detection.
+        const device = new BLEDevice(name, merged, connection);
+        this.registerBLEDevice(device);
+        onNewDeviceFound(device);
       },
     });
     const listeners = this.connections.map(listenerBuilder);
@@ -115,5 +184,224 @@ export class ESPConnection implements IESPConnection {
     for (const { connection, listener } of listeners) {
       connection.off('message.BluetoothLEAdvertisementResponse', listener);
     }
+  }
+
+  private async getRestartButtonKey(connection: Connection): Promise<number | undefined> {
+    const cacheKey = this.getProxyKey(connection.host, connection.port);
+    const cached = this.restartButtonKeys.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const entities = (await connection.listEntitiesService()) as EntityList;
+    const restartButton = entities.find(
+      (entry) => entry.component === 'Button' && this.isRestartButton(entry.entity as ListEntitiesButtonResponse)
+    );
+    if (!restartButton) return undefined;
+
+    const restartKey = (restartButton.entity as ListEntitiesButtonResponse).key;
+    this.restartButtonKeys.set(cacheKey, restartKey);
+    return restartKey;
+  }
+
+  private isRestartButton(entity: ListEntitiesButtonResponse): boolean {
+    if (entity.deviceClass?.toLowerCase() === 'restart') return true;
+    const candidates = [entity.objectId, entity.name, entity.uniqueId]
+      .filter((value) => value)
+      .map((value) => value!.toLowerCase());
+    return candidates.some((value) => value.includes('restart') || value.includes('reboot'));
+  }
+
+  private async tryRebootWithConnection(
+    host: string,
+    port: number,
+    connection?: Connection,
+    useLocalConnection: boolean = false
+  ): Promise<boolean> {
+    if (!connection) return false;
+    try {
+      await this.ensureAuthorized(connection);
+
+      const restartKey = await this.getRestartButtonKey(connection);
+      if (restartKey === undefined) {
+        logWarn(`[ESPHome] Restart button not found for proxy: ${host}`);
+        return false;
+      }
+
+      logInfo(`[ESPHome] Rebooting proxy: ${host}:${port}`);
+      connection.buttonCommandService({ key: restartKey });
+      return true;
+    } catch (error) {
+      if (!useLocalConnection) {
+        logWarn(`[ESPHome] Proxy connection failed for host: ${host}`, error);
+      }
+      return false;
+    }
+  }
+
+  private async ensureAuthorized(connection: Connection, timeoutMs: number = 10_000): Promise<void> {
+    if (connection.authorized) return;
+
+    await new Promise<void>((resolve, reject) => {
+      const onAuthorized = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (error: any) => {
+        cleanup();
+        reject(error);
+      };
+      const cleanup = () => {
+        connection.off('authorized', onAuthorized);
+        connection.off('error', onError);
+        clearTimeout(timeout);
+      };
+
+      connection.once('authorized', onAuthorized);
+      connection.once('error', onError);
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error(`[ESPHome] Authorization timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      if (!connection.connected) {
+        try {
+          connection.connect();
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      }
+    });
+  }
+
+  private getProxyConfig(host: string, port: number): BLEProxy | undefined {
+    return this.proxies.find((proxy) => proxy.host === host && this.normalizePort(proxy.port) === port);
+  }
+
+  private registerBLEDevice(device: BLEDevice) {
+    this.bleDevices.add(device);
+  }
+
+  private attachConnectionHandlers(connection: Connection) {
+    const key = this.getProxyKey(connection.host, connection.port);
+    connection.on('error', (error) => {
+      logWarn(`[ESPHome] Connection error (${key})`, error);
+      this.maybeAutoRebootProxy(connection, error);
+      this.scheduleConnectionRefresh(connection, 'error');
+    });
+    connection.on('disconnected', () => {
+      logWarn(`[ESPHome] Connection disconnected (${key})`);
+      this.scheduleConnectionRefresh(connection, 'disconnected');
+    });
+  }
+
+  private scheduleConnectionRefresh(connection: Connection, reason: string) {
+    if (this.intentionalDisconnects.has(connection)) {
+      this.intentionalDisconnects.delete(connection);
+      return;
+    }
+    if (!this.connections.includes(connection)) return;
+    const key = this.getProxyKey(connection.host, connection.port);
+    if (this.connectionRefreshes.has(key)) return;
+    const refresh = this.refreshConnection(connection, reason)
+      .catch((error) => {
+        logWarn(`[ESPHome] Connection refresh failed (${key})`, error);
+      })
+      .finally(() => {
+        if (this.connectionRefreshes.get(key) === refresh) {
+          this.connectionRefreshes.delete(key);
+        }
+      });
+    this.connectionRefreshes.set(key, refresh);
+  }
+
+  private async refreshConnection(connection: Connection, reason: string) {
+    const key = this.getProxyKey(connection.host, connection.port);
+    logWarn(`[ESPHome] Refreshing connection (${key}) due to ${reason}`);
+    const config = this.buildConnectionConfig(connection);
+    const newConnection = await connectWithRetry(config);
+    this.replaceConnection(connection, newConnection);
+  }
+
+  private buildConnectionConfig(connection: Connection): ConnectionConfig {
+    const normalizedPort = this.normalizePort(connection.port);
+    const proxyConfig = this.getProxyConfig(connection.host, normalizedPort);
+    if (proxyConfig) {
+      return {
+        ...proxyConfig,
+        port: normalizedPort,
+      };
+    }
+    return {
+      host: connection.host,
+      port: normalizedPort,
+      password: connection.password,
+      encryptionKey: (connection as any).encryptionKey,
+      expectedServerName: (connection as any).expectedServerName,
+      clientInfo: connection.clientInfo,
+      reconnectInterval: connection.reconnectInterval,
+      pingInterval: connection.pingInterval,
+      pingAttempts: connection.pingAttempts,
+    };
+  }
+
+  private replaceConnection(previous: Connection, next: Connection) {
+    const key = this.getProxyKey(previous.host, previous.port);
+    const index = this.connections.findIndex(
+      (connection) => this.getProxyKey(connection.host, connection.port) === key
+    );
+    if (index >= 0) {
+      this.connections[index] = next;
+    } else {
+      this.connections.push(next);
+    }
+    this.attachConnectionHandlers(next);
+
+    for (const device of this.bleDevices) {
+      if (device.usesConnection(previous)) device.updateConnection(next);
+    }
+
+    try {
+      this.intentionalDisconnects.add(previous);
+      previous.disconnect();
+    } catch {}
+  }
+
+  private getProxyKey(host: string, port?: number): string {
+    return `${host}:${this.normalizePort(port)}`;
+  }
+
+  private normalizePort(port?: number): number {
+    return port ?? 6053;
+  }
+
+  private maybeAutoRebootProxy(connection: Connection, error: unknown) {
+    if (!this.proxyRecovery.autoRebootOnTimeout) return;
+    if (!this.isBleConnectTimeout(error)) return;
+    const key = this.getProxyKey(connection.host, connection.port);
+    const now = Date.now();
+    const lastTimeout = this.proxyTimeouts.get(key);
+    this.proxyTimeouts.set(key, now);
+
+    const cooldownMs = this.proxyRecovery.rebootCooldownMinutes * 60_000;
+    const windowMs = this.proxyRecovery.rebootWindowMinutes * 60_000;
+    const lastReboot = this.proxyReboots.get(key) ?? 0;
+    if (now - lastReboot < cooldownMs) return;
+    if (!lastTimeout || now - lastTimeout > windowMs) return;
+
+    this.proxyReboots.set(key, now);
+    this.proxyTimeouts.delete(key);
+    logWarn(`[ESPHome] Auto-rebooting proxy (${key}) after repeated BLE timeouts`);
+    void this.rebootProxy(connection.host, connection.port);
+  }
+
+  private isBleConnectTimeout(error: unknown): boolean {
+    if (!error) return false;
+    const message = error instanceof Error ? error.message : String(error);
+    const normalized = message.toLowerCase();
+    return (
+      normalized.includes('bluetoothdeviceconnectionresponse') ||
+      normalized.includes('sendmessage timeout') ||
+      normalized.includes('timed out')
+    );
   }
 }

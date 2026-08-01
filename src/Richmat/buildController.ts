@@ -35,26 +35,32 @@ const logUnsupported = async (bleDevice: IBLEDevice) => {
   );
 };
 
-export const buildController = async (deviceData: IDeviceData, bleDevice: IBLEDevice) => {
+export const buildController = async (
+  deviceData: IDeviceData,
+  bleDevice: IBLEDevice,
+  commandBuilder?: (command: number) => number[]
+) => {
   const { name } = bleDevice;
 
   const advertised = variants.filter(({ isSupported }) => isSupported(bleDevice));
   for (const { variant, controllerBuilder } of advertised) {
-    const controller = await controllerBuilder(deviceData, bleDevice);
+    const controller = await controllerBuilder(deviceData, bleDevice, commandBuilder);
     if (controller) return controller;
     logInfo('[Richmat] Advertised variant does not match the device services:', variant, name);
   }
 
-  // A device can be found via an advertising packet that carries no service uuids at all, which
-  // leaves the checks above with nothing to match on. Fall back to probing the services the device
-  // actually exposes - each controller builder verifies its own write characteristic exists, and the
-  // variants use disjoint services, so this cannot pick the wrong protocol.
-  const remaining = variants.filter((variant) => !advertised.includes(variant));
-  for (const { variant, controllerBuilder } of remaining) {
-    const controller = await controllerBuilder(deviceData, bleDevice);
-    if (!controller) continue;
-    logInfo('[Richmat] Detected variant from device services:', variant, name);
-    return controller;
+  // Only probe other variants when the advertisement identified nothing at all - which is the case
+  // this exists for, since a device can be found via a packet carrying no service uuids. When the
+  // advertisement did name a variant, trust it: the WiLinke builder falls back to guessing a
+  // writable characteristic, and letting it guess for a bed that advertised Nordic would send that
+  // bed WiLinke command frames.
+  if (!advertised.length) {
+    for (const { variant, controllerBuilder } of variants) {
+      const controller = await controllerBuilder(deviceData, bleDevice, commandBuilder);
+      if (!controller) continue;
+      logInfo('[Richmat] Detected variant from device services:', variant, name);
+      return controller;
+    }
   }
 
   await logUnsupported(bleDevice);

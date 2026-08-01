@@ -26,7 +26,9 @@ export class BLEController<TCommand> extends EventEmitter implements IEventSourc
     private handle: number,
     private commandBuilder: (command: TCommand) => number[],
     private notifyHandles: Dictionary<number> = {},
-    private stayConnected: boolean = false
+    private stayConnected: boolean = false,
+    private requireResponse: boolean = true,
+    private disconnectDelayMs: number = 60_000
   ) {
     super();
     Object.entries(notifyHandles).forEach(([key, handle]) => {
@@ -46,14 +48,16 @@ export class BLEController<TCommand> extends EventEmitter implements IEventSourc
       clearTimeout(this.disconnectTimeout);
       this.disconnectTimeout = undefined;
     }
+    let writeSucceeded = false;
     try {
-      await this.bleDevice.writeCharacteristic(this.handle, new Uint8Array(command));
+      await this.bleDevice.writeCharacteristic(this.handle, new Uint8Array(command), this.requireResponse);
+      writeSucceeded = true;
     } catch (e) {
       logError(`[BLE] Failed to write characteristic`, e);
     }
-    if (this.stayConnected) return;
+    if (this.stayConnected || !writeSucceeded) return;
 
-    this.disconnectTimeout = setTimeout(this.disconnect, 60_000);
+    this.disconnectTimeout = setTimeout(this.disconnect, this.disconnectDelayMs);
   };
 
   writeCommand = (command: TCommand, count: number = 1, waitTime?: number) =>
@@ -63,7 +67,17 @@ export class BLEController<TCommand> extends EventEmitter implements IEventSourc
     const commandList = commands.map(this.commandBuilder).filter((command) => command.length > 0);
     if (commandList.length === 0) return;
 
-    await this.bleDevice.connect();
+    if (this.disconnectTimeout) {
+      clearTimeout(this.disconnectTimeout);
+      this.disconnectTimeout = undefined;
+    }
+
+    try {
+      await this.bleDevice.connect();
+    } catch (error) {
+      logError('[BLE] Failed to connect to device', error);
+      return;
+    }
 
     const onTick =
       commandList.length === 1 ? () => this.write(commandList[0]) : () => loopWithWait(commandList, this.write);

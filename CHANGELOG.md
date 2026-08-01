@@ -1,3 +1,23 @@
+## v1.1.24
+
+**New Features**
+
+- (ESPHome) Add a connection supervisor that rebuilds the API connection and re-binds existing BLE devices
+- (ESPHome) Optionally reboot a BLE proxy after repeated connection timeouts, via `bleProxyAutoRebootOnTimeout`
+- (ESPHome) Expose a reboot button for each configured BLE proxy
+- (Richmat) Allow overriding the command frame format per device with `commandProtocol`
+- (Richmat) Auto-detect a writable GATT characteristic when the device does not match a known bed
+- (Richmat, Keeson) Allow tuning motor movement with `motorPulseCount` and `motorPulseDelayMs`
+- (Keeson) Allow selecting the controller variant with `variant`, and keeping the connection open with `stayConnected`
+
+**Bug Fixes**
+
+- (ESPHome) Recover from a sick API socket instead of leaving devices unresponsive
+- (Richmat) Keep per-variant command defaults when `commandProtocol` is not set, so Nordic controllers are not sent WiLinke frames
+- (Richmat) Only guess a writable characteristic when the advertisement identified no variant, so an advertised Nordic bed is never sent WiLinke frames
+- (Richmat, Keeson) Stop the config defaults from pinning `motorPulseCount` to 1, which made held motor buttons send a single pulse
+- (Common) Improve error handling around BLE connect and command failures
+
 ## v1.1.23
 
 **Bug Fixes**

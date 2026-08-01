@@ -8,15 +8,9 @@ import { getDevices } from './options';
 import { setupMassageButtons } from './setupMassageButtons';
 import { setupPresetButtons } from './setupPresetButtons';
 import { setupMotorEntities } from './setupMotorEntities';
-import { isSupported as isKSBTSupported } from './KSBT/isSupported';
 import { controllerBuilder as ksbtControllerBuilder } from './KSBT/controllerBuilder';
-import { isSupported as isBaseI5Supported } from './BaseI5/isSupported';
 import { controllerBuilder as baseI5ControllerBuilder } from './BaseI5/controllerBuilder';
-import { isSupported as isBaseI4Supported } from './BaseI4/isSupported';
 import { controllerBuilder as baseI4ControllerBuilder } from './BaseI4/controllerBuilder';
-
-const checks = [isKSBTSupported, isBaseI5Supported, isBaseI4Supported];
-const controllerBuilders = [ksbtControllerBuilder, baseI5ControllerBuilder, baseI4ControllerBuilder];
 
 export const keeson = async (mqtt: IMQTTConnection, esphome: IESPConnection): Promise<void> => {
   const devices = getDevices();
@@ -36,26 +30,64 @@ export const keeson = async (mqtt: IMQTTConnection, esphome: IESPConnection): Pr
       logInfo(`[Keeson] Device not found in configuration for MAC: ${mac} or Name: ${name}`);
       continue;
     }
-    const controllerBuilder = checks
-      .map((check, index) => (check(bleDevice) ? controllerBuilders[index] : undefined))
-      .filter((check) => check)[0];
-    if (controllerBuilder === undefined) {
+    const { variant, stayConnected, motorPulseCount, motorPulseDelayMs, ...deviceConfig } = device;
+
+    const deviceData = buildMQTTDeviceData({ ...deviceConfig, address }, 'Keeson');
+    try {
+      await connect();
+    } catch (error) {
+      logWarn('[Keeson] Failed to connect to device:', name, error);
+      continue;
+    }
+
+    const tryBuild = async (label: string, builder: typeof ksbtControllerBuilder) => {
+      const controller = await builder(deviceData, bleDevice, stayConnected);
+      if (controller) logInfo('[Keeson] Using protocol for device:', name, label);
+      return controller;
+    };
+
+    let controller;
+    switch (variant) {
+      case 'ksbt':
+        controller = await tryBuild('ksbt', ksbtControllerBuilder);
+        break;
+      case 'base':
+        controller =
+          (await tryBuild('base-i5', baseI5ControllerBuilder)) || (await tryBuild('base-i4', baseI4ControllerBuilder));
+        break;
+      case 'auto':
+      case undefined:
+      default: {
+        controller =
+          (await tryBuild('ksbt', ksbtControllerBuilder)) ||
+          (await tryBuild('base-i5', baseI5ControllerBuilder)) ||
+          (await tryBuild('base-i4', baseI4ControllerBuilder));
+        break;
+      }
+    }
+
+    if (!controller) {
       const {
         advertisement: { manufacturerDataList, serviceUuidsList },
       } = bleDevice;
+      const services = await bleDevice.getServices();
+      if (services.length) {
+        const summary = services.map((service) => ({
+          uuid: service.uuid,
+          characteristics: (service.characteristicsList || []).map((characteristic) => ({
+            uuid: characteristic.uuid,
+            properties: characteristic.properties,
+          })),
+        }));
+        logWarn('[Keeson] Discovered GATT services/characteristics for device:', name, JSON.stringify(summary));
+      } else {
+        logWarn('[Keeson] No GATT services discovered for device:', name);
+      }
       logWarn(
         '[Keeson] Device not supported, please contact me on Discord',
         name,
         JSON.stringify({ name, address, manufacturerDataList, serviceUuidsList })
       );
-      continue;
-    }
-
-    const deviceData = buildMQTTDeviceData({ ...device, address }, 'Keeson');
-    await connect();
-
-    const controller = await controllerBuilder(deviceData, bleDevice);
-    if (!controller) {
       await disconnect();
       continue;
     }
@@ -63,9 +95,15 @@ export const keeson = async (mqtt: IMQTTConnection, esphome: IESPConnection): Pr
     logInfo('[Keeson] Setting up entities for device:', name);
     setupPresetButtons(mqtt, controller);
     setupMassageButtons(mqtt, controller);
-    setupMotorEntities(mqtt, controller);
+    setupMotorEntities(mqtt, controller, { motorPulseCount, motorPulseDelayMs });
 
     const deviceInfo = await getDeviceInfo();
     if (deviceInfo) setupDeviceInfoSensor(mqtt, controller, deviceInfo);
+
+    try {
+      await disconnect();
+    } catch (error) {
+      logWarn('[Keeson] Failed to disconnect from device:', name, error);
+    }
   }
 };

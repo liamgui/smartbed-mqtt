@@ -6,12 +6,37 @@ import { buildMQTTDeviceData } from 'Common/buildMQTTDeviceData';
 import { IESPConnection } from 'ESPHome/IESPConnection';
 import { Features } from './Features';
 import { buildController } from './buildController';
-import { getDevices } from './options';
+import { RichmatDevice, getDevices } from './options';
 import { remoteFeatures } from './remoteFeatures';
 import { setupMassageButtons } from './setupMassageButtons';
 import { setupPresetButtons } from './setupPresetButtons';
 import { setupUnderBedLightButton } from './setupUnderBedLightButton';
 import { setupMotorEntities } from './setupMotorEntities';
+
+const buildCommandBuilder = (commandProtocol?: RichmatDevice['commandProtocol']) => {
+  switch (commandProtocol) {
+    case 'single':
+    case 'nordic':
+      return (command: number) => [command & 0xff];
+    case 'prefix55': {
+      const prefix = [0x55, 0x01, 0x00];
+      return (command: number) => {
+        const checksum = (command + prefix[0] + prefix[1]) & 0xff;
+        return [...prefix, command & 0xff, checksum];
+      };
+    }
+    case 'prefixaa': {
+      const prefix = [0xaa, 0x01, 0x00];
+      return (command: number) => {
+        const checksum = (command + prefix[0] + prefix[1]) & 0xff;
+        return [...prefix, command & 0xff, checksum];
+      };
+    }
+    case 'wilinke':
+    default:
+      return (command: number) => [110, 1, 0, command & 0xff, (command + 111) & 0xff];
+  }
+};
 
 export const richmat = async (mqtt: IMQTTConnection, esphome: IESPConnection) => {
   const devices = getDevices();
@@ -29,7 +54,7 @@ export const richmat = async (mqtt: IMQTTConnection, esphome: IESPConnection) =>
       logInfo(`[Richmat] Device not found in configuration for MAC: ${mac} or Name: ${name}`);
       continue;
     }
-    const { remoteCode, ...device } = configuredDevice;
+    const { remoteCode, motorPulseCount, motorPulseDelayMs, ...device } = configuredDevice;
 
     const features = remoteFeatures[remoteCode];
     if (!features) {
@@ -37,10 +62,22 @@ export const richmat = async (mqtt: IMQTTConnection, esphome: IESPConnection) =>
       continue;
     }
 
-    const deviceData = buildMQTTDeviceData({ ...device, address }, 'Richmat');
-    await connect();
+    // Only override the frame format when the user asked for a specific protocol - otherwise let
+    // each controller variant apply its own default (Nordic sends a bare byte, WiLinke a 5-byte
+    // frame), which is what variant detection is for.
+    const { commandProtocol } = device;
+    const commandBuilder = commandProtocol ? buildCommandBuilder(commandProtocol) : undefined;
+    if (commandProtocol) logInfo('[Richmat] Using command protocol for device:', name, commandProtocol);
 
-    const controller = await buildController(deviceData, bleDevice);
+    const deviceData = buildMQTTDeviceData({ ...device, address }, 'Richmat');
+    try {
+      await connect();
+    } catch (error) {
+      logWarn('[Richmat] Failed to connect to device:', name, error);
+      continue;
+    }
+
+    const controller = await buildController(deviceData, bleDevice, commandBuilder);
     if (!controller) {
       await disconnect();
       continue;
@@ -53,7 +90,7 @@ export const richmat = async (mqtt: IMQTTConnection, esphome: IESPConnection) =>
     setupPresetButtons(mqtt, controller, hasFeature);
     setupMassageButtons(mqtt, controller, hasFeature);
     setupUnderBedLightButton(mqtt, controller, hasFeature);
-    setupMotorEntities(mqtt, controller, hasFeature);
+    setupMotorEntities(mqtt, controller, hasFeature, { motorPulseCount, motorPulseDelayMs });
 
     const deviceInfo = await bleDevice.getDeviceInfo();
     if (deviceInfo) setupDeviceInfoSensor(mqtt, controller, deviceInfo);

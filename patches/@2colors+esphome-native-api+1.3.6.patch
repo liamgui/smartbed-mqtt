@@ -1,0 +1,242 @@
+diff --git a/node_modules/@2colors/esphome-native-api/index.d.ts b/node_modules/@2colors/esphome-native-api/index.d.ts
+index 6d78c98..d63f9b5 100644
+--- a/node_modules/@2colors/esphome-native-api/index.d.ts
++++ b/node_modules/@2colors/esphome-native-api/index.d.ts
+@@ -590,7 +590,8 @@ declare module "@2colors/esphome-native-api" {
+             address: number
+         ): Promise<BluetoothDeviceUnpairingResponse>;
+         listBluetoothGATTServicesService(
+-            address: number
++            address: number,
++            timeoutSeconds?: number
+         ): Promise<BluetoothGATTGetServicesResponse>;
+ 
+         readBluetoothGATTCharacteristicService(
+diff --git a/node_modules/@2colors/esphome-native-api/lib/connection.js b/node_modules/@2colors/esphome-native-api/lib/connection.js
+index c6830b1..80ee70a 100644
+--- a/node_modules/@2colors/esphome-native-api/lib/connection.js
++++ b/node_modules/@2colors/esphome-native-api/lib/connection.js
+@@ -400,7 +400,7 @@ class EsphomeNativeApiConnection extends EventEmitter {
+             10
+         );
+     }
+-    async listBluetoothGATTServicesService(address) {
++    async listBluetoothGATTServicesService(address, timeoutSeconds = 15) {
+         if (!this.connected) throw new Error(`Not connected`);
+         if (!this.authorized) throw new Error(`Not authorized`);
+         const message = new pb.BluetoothGATTGetServicesRequest([address]);
+@@ -411,18 +411,23 @@ class EsphomeNativeApiConnection extends EventEmitter {
+                 servicesList.push(...message.servicesList);
+         };
+         this.on('message.BluetoothGATTGetServicesResponse', onMessage);
+-        await this.sendMessageAwaitResponse(
+-            message,
+-            'BluetoothGATTGetServicesDoneResponse'
+-        ).then(
+-            () => {
+-                this.off('message.BluetoothGATTGetServicesResponse', onMessage);
+-            },
+-            (e) => {
+-                this.off('message.BluetoothGATTGetServicesResponse', onMessage);
+-                throw e;
++        try {
++            await this.sendMessageAwaitResponse(
++                message,
++                'BluetoothGATTGetServicesDoneResponse',
++                timeoutSeconds
++            );
++        } catch (e) {
++            this.off('message.BluetoothGATTGetServicesResponse', onMessage);
++            // The Done response can be dropped even though every service was
++            // already streamed - keep what we have rather than failing outright.
++            const messageText = e && e.message ? String(e.message) : "";
++            if (servicesList.length && messageText.includes('timeout')) {
++                return { address, servicesList };
+             }
+-        );
++            throw e;
++        }
++        this.off('message.BluetoothGATTGetServicesResponse', onMessage);
+         return { address, servicesList };
+     }
+ 
+diff --git a/node_modules/@2colors/esphome-native-api/lib/protoc/api_pb.js b/node_modules/@2colors/esphome-native-api/lib/protoc/api_pb.js
+index 9e73016..1368ed1 100644
+--- a/node_modules/@2colors/esphome-native-api/lib/protoc/api_pb.js
++++ b/node_modules/@2colors/esphome-native-api/lib/protoc/api_pb.js
+@@ -26759,7 +26759,7 @@ proto.BluetoothGATTDescriptor.deserializeBinaryFromReader = function(msg, reader
+     var field = reader.getFieldNumber();
+     switch (field) {
+     case 1:
+-      var values = /** @type {!Array<number>} */ (reader.isDelimited() ? reader.readPackedUint64() : [reader.readUint64()]);
++      var values = /** @type {!Array<string>} */ (reader.isDelimited() ? reader.readPackedUint64String() : [reader.readUint64String()]);
+       for (var i = 0; i < values.length; i++) {
+         msg.addUuid(values[i]);
+       }
+@@ -26803,7 +26803,7 @@ proto.BluetoothGATTDescriptor.serializeBinaryToWriter = function(message, writer
+   var f = undefined;
+   f = message.getUuidList();
+   if (f.length > 0) {
+-    writer.writePackedUint64(
++    writer.writePackedUint64String(
+       1,
+       f
+     );
+@@ -26980,7 +26980,7 @@ proto.BluetoothGATTCharacteristic.deserializeBinaryFromReader = function(msg, re
+     var field = reader.getFieldNumber();
+     switch (field) {
+     case 1:
+-      var values = /** @type {!Array<number>} */ (reader.isDelimited() ? reader.readPackedUint64() : [reader.readUint64()]);
++      var values = /** @type {!Array<string>} */ (reader.isDelimited() ? reader.readPackedUint64String() : [reader.readUint64String()]);
+       for (var i = 0; i < values.length; i++) {
+         msg.addUuid(values[i]);
+       }
+@@ -27033,7 +27033,7 @@ proto.BluetoothGATTCharacteristic.serializeBinaryToWriter = function(message, wr
+   var f = undefined;
+   f = message.getUuidList();
+   if (f.length > 0) {
+-    writer.writePackedUint64(
++    writer.writePackedUint64String(
+       1,
+       f
+     );
+@@ -27280,7 +27280,7 @@ proto.BluetoothGATTService.deserializeBinaryFromReader = function(msg, reader) {
+     var field = reader.getFieldNumber();
+     switch (field) {
+     case 1:
+-      var values = /** @type {!Array<number>} */ (reader.isDelimited() ? reader.readPackedUint64() : [reader.readUint64()]);
++      var values = /** @type {!Array<string>} */ (reader.isDelimited() ? reader.readPackedUint64String() : [reader.readUint64String()]);
+       for (var i = 0; i < values.length; i++) {
+         msg.addUuid(values[i]);
+       }
+@@ -27329,7 +27329,7 @@ proto.BluetoothGATTService.serializeBinaryToWriter = function(message, writer) {
+   var f = undefined;
+   f = message.getUuidList();
+   if (f.length > 0) {
+-    writer.writePackedUint64(
++    writer.writePackedUint64String(
+       1,
+       f
+     );
+diff --git a/node_modules/@2colors/esphome-native-api/lib/utils/frameHelper.js b/node_modules/@2colors/esphome-native-api/lib/utils/frameHelper.js
+index f0ff260..3ba7ddc 100644
+--- a/node_modules/@2colors/esphome-native-api/lib/utils/frameHelper.js
++++ b/node_modules/@2colors/esphome-native-api/lib/utils/frameHelper.js
+@@ -42,14 +42,20 @@ class FrameHelper extends EventEmitter {
+     }
+ 
+     buildMessage(messageId, bytes) {
++        const type = id_to_type[messageId];
++        if (typeof type === "undefined") {
++            // Unknown message id - newer ESPHome firmware sends messages this
++            // client has no mapping for. Skip the frame instead of killing the
++            // connection.
++            return null;
++        }
+         try {
+-            return pb[id_to_type[messageId]].deserializeBinary(bytes);
++            return pb[type].deserializeBinary(bytes);
+         } catch(e) {
+             this.emit('error', new Error(`Failed find or parsed message type for Id: ${messageId}`));
+-            if (typeof id_to_type[messageId] !== undefined) {
+-                // we know this type and close connect mb error or freeze connect
+-                this.end();
+-            }
++            // we know this type and close connect mb error or freeze connect
++            this.end();
++            return null;
+         }
+     }
+ 
+diff --git a/node_modules/@2colors/esphome-native-api/lib/utils/mapMessageByType.js b/node_modules/@2colors/esphome-native-api/lib/utils/mapMessageByType.js
+index 64935c1..8d7b869 100644
+--- a/node_modules/@2colors/esphome-native-api/lib/utils/mapMessageByType.js
++++ b/node_modules/@2colors/esphome-native-api/lib/utils/mapMessageByType.js
+@@ -21,6 +21,17 @@ const uuidFromBytes = (bytes, len = -1) => {
+         .join("");
+ }
+ const BT_BASE_UUID_SUFFIX = "0000-1000-8000-00805f9b34fb";
++// API v1.12+ (ESPHome 2025.8+) reports 16-/32-bit GATT UUIDs in `short_uuid`
++// and leaves `uuid` empty. Expand those back to the full 128-bit form.
++const shortUuidToFull = (shortUuid) => {
++    if (!shortUuid) return "";
++    return [
++        shortUuid.toString(16).padStart(8, "0"),
++        BT_BASE_UUID_SUFFIX
++    ]
++        .join("-")
++        .toLowerCase();
++};
+ const makeShortUuid = (bytes, len = -1) => {
+     return [
+         uuidFromBytes(bytes, len).padStart(8, "0"),
+@@ -157,16 +168,16 @@ const mapMessageByType = (type, obj) => {
+             return {
+                 ...rest,
+                 servicesList: servicesList.map(
+-                    ({ uuidList, characteristicsList, ...rest }) => ({
+-                        uuid: uuidDecode(uuidList),
++                    ({ uuidList, shortUuid, characteristicsList, ...rest }) => ({
++                        uuid: shortUuid ? shortUuidToFull(shortUuid) : uuidDecode(uuidList),
+                         ...rest,
+                         characteristicsList: characteristicsList.map(
+-                            ({ uuidList, descriptorsList, ...rest }) => ({
+-                                uuid: uuidDecode(uuidList),
++                            ({ uuidList, shortUuid, descriptorsList, ...rest }) => ({
++                                uuid: shortUuid ? shortUuidToFull(shortUuid) : uuidDecode(uuidList),
+                                 ...rest,
+                                 descriptorsList: descriptorsList.map(
+-                                    ({ uuidList, ...rest }) => ({
+-                                        uuid: uuidDecode(uuidList),
++                                    ({ uuidList, shortUuid, ...rest }) => ({
++                                        uuid: shortUuid ? shortUuidToFull(shortUuid) : uuidDecode(uuidList),
+                                         ...rest,
+                                     })
+                                 ),
+diff --git a/node_modules/@2colors/esphome-native-api/lib/utils/noiseFrameHelper.js b/node_modules/@2colors/esphome-native-api/lib/utils/noiseFrameHelper.js
+index a07678d..72c99c5 100644
+--- a/node_modules/@2colors/esphome-native-api/lib/utils/noiseFrameHelper.js
++++ b/node_modules/@2colors/esphome-native-api/lib/utils/noiseFrameHelper.js
+@@ -67,7 +67,9 @@ class NoiseFrameHelper extends FrameHelper {
+                         const message = this.deserialize(
+                             this.decryptor.DecryptWithAd([], frame)
+                         );
+-                        this.emit("message", message);
++                        if (message && !message.skip) {
++                            this.emit("message", message);
++                        }
+                 }
+             }
+         } catch (e) {
+@@ -128,6 +130,9 @@ class NoiseFrameHelper extends FrameHelper {
+         const messageId = (buffer[0] << 8) | buffer[1];
+         const messageLength = (buffer[2] << 8) | buffer[3];
+         const message = this.buildMessage(messageId, buffer.subarray(4, messageLength + 4));
++        if (!message) {
++            return { length: messageLength + 4, skip: true };
++        }
+         message.length = messageLength + 4;
+         return message;
+     }
+diff --git a/node_modules/@2colors/esphome-native-api/lib/utils/plaintextFrameHelper.js b/node_modules/@2colors/esphome-native-api/lib/utils/plaintextFrameHelper.js
+index 8bb8dfe..838973b 100644
+--- a/node_modules/@2colors/esphome-native-api/lib/utils/plaintextFrameHelper.js
++++ b/node_modules/@2colors/esphome-native-api/lib/utils/plaintextFrameHelper.js
+@@ -43,6 +43,9 @@ class PlaintextFrameHelper extends FrameHelper {
+             return null;
+ 
+         const message = this.buildMessage(messageId, buffer.subarray(offset, messageLength + offset));
++        if (!message) {
++            return { length: messageLength + offset, skip: true };
++        }
+         message.length = messageLength + offset;
+         return message;
+     }
+@@ -54,6 +57,7 @@ class PlaintextFrameHelper extends FrameHelper {
+         try {
+             while ((message = this.deserialize(this.buffer))) {
+                 this.buffer = this.buffer.slice(message.length);
++                if (message.skip) continue;
+                 this.emit("message", message);
+             }
+         } catch (e) {

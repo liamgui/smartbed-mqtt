@@ -7,7 +7,8 @@ export const controllerBuilder = async (deviceData: IDeviceData, bleDevice: IBLE
 
   const characteristic = await getCharacteristic(
     '6e400001-b5a3-f393-e0a9-e50e24dcca9e',
-    '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
+    '6e400002-b5a3-f393-e0a9-e50e24dcca9e',
+    false
   );
   if (!characteristic) return undefined;
 

@@ -5,19 +5,13 @@ import { setupDeviceInfoSensor } from 'BLE/setupDeviceInfoSensor';
 import { buildMQTTDeviceData } from 'Common/buildMQTTDeviceData';
 import { IESPConnection } from 'ESPHome/IESPConnection';
 import { Features } from './Features';
-import { controllerBuilder as nordicControllerBuilder } from './Nordic/controllerBuilder';
-import { isSupported as isNordicSupported } from './Nordic/isSupported';
-import { controllerBuilder as wiLinkeControllerBuilder } from './WiLinke/controllerBuilder';
-import { isSupported as isWiLinkeSupported } from './WiLinke/isSupported';
+import { buildController } from './buildController';
 import { getDevices } from './options';
 import { remoteFeatures } from './remoteFeatures';
 import { setupMassageButtons } from './setupMassageButtons';
 import { setupPresetButtons } from './setupPresetButtons';
 import { setupUnderBedLightButton } from './setupUnderBedLightButton';
 import { setupMotorEntities } from './setupMotorEntities';
-
-const checks = [isNordicSupported, isWiLinkeSupported];
-const controllerBuilders = [nordicControllerBuilder, wiLinkeControllerBuilder];
 
 export const richmat = async (mqtt: IMQTTConnection, esphome: IESPConnection) => {
   const devices = getDevices();
@@ -29,23 +23,13 @@ export const richmat = async (mqtt: IMQTTConnection, esphome: IESPConnection) =>
   const bleDevices = await esphome.getBLEDevices(deviceNames);
   for (const bleDevice of bleDevices) {
     const { name, mac, address, connect, disconnect } = bleDevice;
+    const configuredDevice = devicesMap[mac] || devicesMap[name.toLowerCase()];
 
-    const controllerBuilder = checks
-      .map((check, index) => (check(bleDevice) ? controllerBuilders[index] : undefined))
-      .filter((check) => check)[0];
-    if (controllerBuilder === undefined) {
-      const {
-        advertisement: { manufacturerDataList, serviceUuidsList },
-      } = bleDevice;
-      logWarn(
-        '[Richmat] Device not supported, please contact me on Discord',
-        name,
-        JSON.stringify({ name, address, manufacturerDataList, serviceUuidsList })
-      );
+    if (!configuredDevice) {
+      logInfo(`[Richmat] Device not found in configuration for MAC: ${mac} or Name: ${name}`);
       continue;
     }
-
-    const { remoteCode, ...device } = devicesMap[mac] || devicesMap[name.toLowerCase()];
+    const { remoteCode, ...device } = configuredDevice;
 
     const features = remoteFeatures[remoteCode];
     if (!features) {
@@ -56,7 +40,7 @@ export const richmat = async (mqtt: IMQTTConnection, esphome: IESPConnection) =>
     const deviceData = buildMQTTDeviceData({ ...device, address }, 'Richmat');
     await connect();
 
-    const controller = await controllerBuilder(deviceData, bleDevice);
+    const controller = await buildController(deviceData, bleDevice);
     if (!controller) {
       await disconnect();
       continue;

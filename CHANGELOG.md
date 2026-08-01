@@ -1,3 +1,15 @@
+## v1.1.23
+
+**Bug Fixes**
+
+- (ESPHome) Update esphome-native-api to 1.3.6 and patch GATT UUID decoding
+- (ESPHome) Fix devices not being found on ESPHome 2025.8+, which reports short UUIDs in a new field
+- (ESPHome) Fix 128-bit UUIDs being corrupted by the library's 64-bit number handling
+- (ESPHome) Ignore unrecognised API messages instead of dropping the proxy connection
+- (ESPHome) Allow longer for GATT service discovery, and keep services already received on timeout
+- (ESPHome) Merge BLE advertisement packets so devices that split advertising data are detected
+- (Richmat) Detect controller variant from the device services when the advertisement is incomplete
+
 ## v1.1.22
 
 **New Features**

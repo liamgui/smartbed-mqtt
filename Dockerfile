@@ -4,6 +4,7 @@ RUN apk --no-cache add git
 
 COPY package.json /smartbed-mqtt/
 COPY yarn.lock /smartbed-mqtt/
+COPY patches /smartbed-mqtt/patches/
 WORKDIR /smartbed-mqtt
 
 RUN yarn install
@@ -42,5 +43,5 @@ LABEL \
     io.hass.name="Smartbed Integration via MQTT" \
     io.hass.description="Home Assistant Community Add-on for Smartbeds" \
     io.hass.type="addon" \
-    io.hass.version="1.1.22" \
+    io.hass.version="1.1.23" \
     maintainer="Richard Hopton <richard@thehoptons.com>"
